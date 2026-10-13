@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyObservation, explainObservation, normalizeExtraction } from '../server/domain.mjs';
+import { localExtract } from '../server/pipeline.mjs';
 import { buildFhirBundle } from '../server/fhir.mjs';
 
 const metadata = {
@@ -282,4 +283,31 @@ test('does not treat ordinary clinical prose as an instruction', () => {
   }, { fileName: 'x.txt', sourceText: `${metadata.sourceText}\nMetformin: 500 mg; Take after food.` });
   assert.equal(record.observations[0].value, 112, 'a normal observation must still extract');
   assert.equal(record.medications.length, 1, 'a normal prescription must still extract');
+});
+
+test('accurately extracts results for parenthesized test names and ordinals', () => {
+  const sourceText = 'Vitamin D (25-OH Total): 24.5 ng/mL; reference range: 30 - 100\nTSH 3rd Gen: 2.15 mIU/L; reference range: 0.4 - 4.5';
+  const raw = {
+    observations: [
+      { name: 'Vitamin D', value: 24.5, unit: 'ng/mL', sourceText: 'Vitamin D (25-OH Total): 24.5 ng/mL; reference range: 30 - 100' },
+      { name: 'TSH', value: 2.15, unit: 'mIU/L', sourceText: 'TSH 3rd Gen: 2.15 mIU/L; reference range: 0.4 - 4.5' },
+    ],
+  };
+  const record = normalizeExtraction(raw, { fileName: 'lab.txt', sourceText });
+  assert.equal(record.observations[0].value, 24.5);
+  assert.equal(record.observations[0].status, 'low');
+  assert.equal(record.observations[1].value, 2.15);
+  assert.equal(record.observations[1].status, 'normal');
+});
+
+test('localExtract deterministic parser parses prescriptions and diagnoses', () => {
+  const rx = 'Dr. Sharma\nDate: 2026-10-12\nDiagnosis: Hypertension\nRx:\n1. Tab Metformin 500 mg - 1 tablet twice daily with meals for 3 months\n2. Tab Telmisartan 40 mg - once daily in the morning';
+  const parsed = localExtract(rx);
+  assert.equal(parsed.type, 'prescription');
+  assert.equal(parsed.medications.length, 2);
+  assert.equal(parsed.medications[0].name, 'Metformin');
+  assert.equal(parsed.medications[0].dosage, '500 mg');
+  assert.equal(parsed.medications[0].frequency, 'twice daily');
+  assert.equal(parsed.diagnoses.length, 1);
+  assert.equal(parsed.diagnoses[0].name, 'Hypertension');
 });

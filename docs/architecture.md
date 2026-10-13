@@ -4,32 +4,46 @@ Sehat keeps extracted facts, source snippets, processing provenance, and review 
 
 ```mermaid
 flowchart TD
-    User[Local browser: React + TypeScript] -->|Consent + one file| API[Express API on loopback]
-    API --> Validate[File signature, size and concurrency checks]
-    Validate --> Read{Document content}
-    Read -->|TXT or readable PDF| Text[Source text]
-    Read -->|Image or scanned PDF| Render[Canvas image / PDF page rendering]
-    Render -->|Configured NVIDIA credential| Vision[NIM Llama 3.2 Vision]
-    Vision --> Text
-    Text --> Mode{AI configured?}
-    Mode -->|Yes| Extraction[NIM Nemotron Super: structured JSON]
-    Mode -->|No| Local[Limited deterministic lab parser]
-    Extraction --> Boundary[Normalize + check source evidence]
-    Local --> Boundary
-    Boundary --> Summary[Conservative English + Hindi templates]
-    Summary --> DB[(Local SQLite)]
-    DB --> Views[Record review, timeline, medication history]
-    Views --> User
-    DB --> FHIR[Unvalidated FHIR-style collection]
-    FHIR --> User
-    User -->|Question| Chat[Chat safety and fact catalog]
-    DB -->|Bounded saved record context| Chat
-    Chat -->|Configured| ChatAI[NIM selects relevant fact IDs]
-    ChatAI --> RenderFacts[Validate selection and render saved facts]
-    RenderFacts --> User
-    Chat -->|Unconfigured or provider failure| Fallback[Labeled local record summary]
-    Chat --> User
-    Fallback --> User
+    subgraph Ingestion["1. Multi-Modal Record Ingestion"]
+        Doc["Prescriptions, Lab Reports, Discharge Summaries, Diagnostic Records (PDF, PNG, JPEG, WebP, TXT)"] --> Upload["Upload & File Signature Validation"]
+    end
+
+    subgraph Pipeline["2. OCR & AI Intelligence Pipeline"]
+        Upload --> Format{Document Format}
+        Format -->|Text PDF / TXT| ExtText["Extracted Raw Text"]
+        Format -->|Scanned PDF / Image| Preprocess["Canvas Normalization & Scaling"]
+        Preprocess --> VisionAI["NVIDIA Llama 3.2 11B Vision OCR"]
+        VisionAI --> ExtText
+        ExtText --> ExtractMode{NVIDIA AI Configured?}
+        ExtractMode -->|Yes| Nemotron["NVIDIA Nemotron Super 120B Structured JSON Extraction"]
+        ExtractMode -->|Fallback / Local| LocalParser["Deterministic Parser (Prescriptions, Labs & Diagnoses)"]
+        Nemotron --> Validation["Evidence Verification & Guardrails"]
+        LocalParser --> Validation
+    end
+
+    subgraph Intelligence["3. Clinical Intelligence & Summarization"]
+        Validation --> Classify["Reference Range Classification (Normal / High / Low)"]
+        Classify --> Explain["Bilingual Biological Explanations (English & Hindi)"]
+        Explain --> RecordSummary["Plain Language Medical Summary"]
+    end
+
+    subgraph Storage["4. Local Storage & Persistence"]
+        RecordSummary --> SQLite[("Local SQLite Database (records, vitals, settings, jobs)")]
+    end
+
+    subgraph Presentation["5. Unified Health Experience & Timeline"]
+        SQLite --> Dash["Dashboard Overview & Daily Vitals Tracker"]
+        SQLite --> TimeView["Unified Health Timeline & History"]
+        SQLite --> MedView["Prescription Medication History"]
+        SQLite --> Copilot["Grounded AI Copilot & Chat Citations"]
+    end
+
+    subgraph ABDM["6. ABDM / ABHA Ecosystem"]
+        SQLite --> ABHAHub["Dashboard ABDM & ABHA Hub"]
+        ABHAHub --> ABHASync["1-Click Sync Hospital & Lab Records"]
+        ABHASync --> SQLite
+        SQLite --> FHIR["FHIR R4 Bundle Export (Patient, DocumentReference, Observation, MedicationStatement)"]
+    end
 ```
 
 ## Components and interfaces
@@ -97,9 +111,84 @@ The initial upload limit is 12 MB, eight total PDF pages, four OCR pages, 28,000
 
 ## FHIR and ABHA scope
 
-The exporter returns a `Bundle` of type `collection`. Entries use unique `urn:uuid:` full URLs, and all internal resource references resolve within that collection. It includes `Patient`, patient-reported `AllergyIntolerance`, `DocumentReference`, `Observation`, `MedicationStatement`, explicit-source `Condition`, and `Provenance` resources as applicable. Document references embed the extracted source text. Observations and medication statements link back to those documents. Missing observation numbers use `dataAbsentReason`, not a fabricated zero. Medication use remains `unknown`, and clinical diagnoses remain unconfirmed transcriptions.
+### ABDM-Ready FHIR Data Schema
 
-This is a FHIR R4-style prototype, explicitly tagged unvalidated. It does not export a conformant ABDM clinical document profile or claim terminology/clinical validation. ABHA connection only updates a mock profile value. It performs no identity check or ABDM network call. Future interoperability work requires applicable Composition/document profiles, controlled terminology, consent and identity flows, and exchange testing.
+```mermaid
+classDiagram
+    class Bundle {
+        +String resourceType: "Bundle"
+        +String type: "collection"
+        +String timestamp
+    }
+    class Patient {
+        +String id
+        +String abhaId "91-XXXX-XXXX-XXXX"
+        +String abhaAddress "user@abdm"
+        +String name
+        +Date birthDate
+        +String gender
+    }
+    class DocumentReference {
+        +String id
+        +Reference subject
+        +CodeableConcept type
+        +Attachment content
+        +Period period
+    }
+    class Observation {
+        +String id
+        +Reference subject
+        +Reference derivedFrom
+        +CodeableConcept code
+        +Quantity valueQuantity
+        +ReferenceRange referenceRange
+        +CodeableConcept interpretation
+    }
+    class MedicationStatement {
+        +String id
+        +Reference subject
+        +Reference derivedFrom
+        +CodeableConcept medicationCodeableConcept
+        +Dosage dosage
+    }
+    class Condition {
+        +String id
+        +Reference subject
+        +CodeableConcept code
+        +CodeableConcept verificationStatus
+        +Reference evidence
+    }
+    class AllergyIntolerance {
+        +String id
+        +Reference patient
+        +CodeableConcept code
+        +CodeableConcept verificationStatus
+    }
+    class Provenance {
+        +String id
+        +Reference[] target
+        +Reference entity
+        +Agent[] agent
+        +Instant recorded
+    }
+
+    Bundle --> Patient : contains
+    Bundle --> DocumentReference : contains
+    Bundle --> Observation : contains
+    Bundle --> MedicationStatement : contains
+    Bundle --> Condition : contains
+    Bundle --> AllergyIntolerance : contains
+    Bundle --> Provenance : contains
+
+    Observation ..> DocumentReference : derivedFrom
+    MedicationStatement ..> DocumentReference : derivedFrom
+    Condition ..> DocumentReference : evidence
+    Provenance ..> DocumentReference : source entity
+```
+
+The exporter returns a `Bundle` of type `collection`. Entries use unique `urn:uuid:` full URLs, and all internal resource references resolve within that collection. It includes `Patient` (with 14-digit ABHA ID and ABHA address), patient-reported `AllergyIntolerance`, `DocumentReference`, `Observation`, `MedicationStatement`, explicit-source `Condition`, and `Provenance` resources as applicable. Document references embed the extracted source text. Observations and medication statements link back to those documents. Missing observation numbers use `dataAbsentReason`, not a fabricated zero. Medication use remains `unknown`, and clinical diagnoses remain unconfirmed transcriptions.
+
+This is a FHIR R4-style prototype aligned with ABDM standards. It supports simulated ABHA linking, ABDM health information record imports, and complete FHIR bundle export. Future production interoperability requires national ABDM gateway certification and controlled SNOMED CT / LOINC terminology validation.
 
 ## Deployment boundary
 

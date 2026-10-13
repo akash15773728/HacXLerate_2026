@@ -91,17 +91,59 @@ function hasNumber(source, number) {
 }
 
 function hasResultNumber(source, name, value) {
+  if (value === null) return false;
   const text = comparable(source);
   const printedName = comparable(name);
   const index = text.indexOf(printedName);
   if (index < 0) return false;
-  const tail = text.slice(index + printedName.length).replace(/[−–—]/g, '-');
-  const firstNumber = /[+-]?(?:\d+(?:\.\d*)?|\.\d+)/.exec(tail);
-  if (!firstNumber) return false;
-  const prefix = tail.slice(0, firstNumber.index);
-  // Qualified values must remain text evidence rather than becoming exact numbers.
-  if (/[<>≤≥]|less than|greater than|below|above/i.test(prefix)) return false;
-  return Number(firstNumber[0]) === value;
+  let tail = text.slice(index + printedName.length).replace(/[−–—]/g, '-');
+
+  // If tail begins with a parenthesized tag or range like (25-OH) or (70-99 mg/dL),
+  // skip it if there is another number following it.
+  const parenMatch = /^\s*\([^)]*\)\s*[:|]?\s*/.exec(tail);
+  if (parenMatch) {
+    const afterParen = tail.slice(parenMatch[0].length);
+    if (/[+-]?(?:\d+(?:\.\d*)?|\.\d+)/.test(afterParen)) {
+      tail = afterParen;
+    }
+  }
+
+  // Iterate over candidate numbers in tail
+  for (const match of tail.matchAll(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)/g)) {
+    const matchIndex = match.index ?? 0;
+    const prefix = tail.slice(0, matchIndex);
+    // Skip ordinal suffixes like 3rd, 2nd, 1st
+    if (/^\d+(?:st|nd|rd|th)\b/i.test(tail.slice(matchIndex))) continue;
+    // Qualified values must remain text evidence rather than becoming exact numbers.
+    if (/[<>≤≥]|less than|greater than|below|above/i.test(prefix)) return false;
+    // In 70-99 the hyphen separates range endpoints; in "-99" it is a sign.
+    const token = match[0].startsWith('-') && /\d/.test(tail[matchIndex - 1] ?? '') ? match[0].slice(1) : match[0];
+    const candidate = Number(token);
+    // If we passed an explicit reference range indicator, we are beyond the result value
+    if (/(?:reference(?:\s+range)?|ref\.?|normal\s+range)\s*[:(]?\s*$/i.test(prefix)) {
+      return false;
+    }
+    return candidate === value;
+  }
+  return false;
+}
+
+function resolveMissingSourceSnippet(documentText, proposedSnippet, anchor) {
+  if (proposedSnippet) return proposedSnippet;
+  if (!anchor || !documentText) return '';
+  const docComp = comparable(documentText);
+  const anchorComp = comparable(anchor);
+  const idx = docComp.indexOf(anchorComp);
+  if (idx >= 0) {
+    const rawIndex = documentText.toLowerCase().indexOf(anchor.toLowerCase());
+    const searchIdx = rawIndex >= 0 ? rawIndex : idx;
+    const start = Math.max(0, documentText.lastIndexOf('\n', searchIdx));
+    let end = documentText.indexOf('\n', searchIdx + anchor.length);
+    if (end < 0) end = documentText.length;
+    const snippet = documentText.slice(start, end).trim();
+    if (snippet) return snippet;
+  }
+  return '';
 }
 
 /** A flag describes only the two-sided range printed on this particular report. */
@@ -111,6 +153,18 @@ export function classifyObservation(observation = {}) {
   // Equal bounds are a degenerate range, not a comparison: "within 6.1–6.1" would misstate the report.
   if (low === high) return 'unknown';
   return value < low ? 'low' : value > high ? 'high' : 'normal';
+}
+
+function biomarkerContext(name) {
+  const n = String(name || '').toLowerCase();
+  if (/hba1c|glycated/i.test(n)) return { en: ' HbA1c measures average blood sugar over the last 2–3 months.', hi: ' HbA1c पिछले 2–3 महीनों में औसत ब्लड शुगर स्तर को दर्शाता है।' };
+  if (/fasting glucose|glucose|sugar/i.test(n)) return { en: ' Fasting glucose measures circulating blood sugar after an overnight fast.', hi: ' फास्टिंग ग्लूकोज़ रातभर खाली पेट रहने के बाद ब्लड शुगर स्तर को मापता है।' };
+  if (/hemoglobin|haemoglobin|\bhb\b/i.test(n)) return { en: ' Hemoglobin is the protein in red blood cells that transports oxygen through your body.', hi: ' हीमोग्लोबिन लाल रक्त कोशिकाओं में मौजूद प्रोटीन है जो शरीर में ऑक्सीजन पहुंचाता है।' };
+  if (/vitamin d|vit d|cholecalciferol/i.test(n)) return { en: ' Vitamin D is essential for calcium absorption, bone strength, and immune balance.', hi: ' विटामिन D हड्डियों की मजबूती, कैल्शियम अवशोषण और रोग प्रतिरोधक क्षमता के लिए आवश्यक है।' };
+  if (/cholesterol|ldl|hdl|triglyceride/i.test(n)) return { en: ' Lipid markers assess circulating blood fats related to cardiovascular health.', hi: ' लिपिड मार्कर हृदय स्वास्थ्य से जुड़ी रक्त वसा की स्थिति का आकलन करते हैं।' };
+  if (/creatinine|egfr|urea|bun\b/i.test(n)) return { en: ' Kidney biomarkers measure filtration efficiency and renal health.', hi: ' किडनी बायोमार्कर गुर्दे की कार्यक्षमता और फिल्टर करने की क्षमता का संकेत देते हैं।' };
+  if (/tsh|thyroid/i.test(n)) return { en: ' TSH reflects thyroid gland activity and metabolic regulation.', hi: ' TSH थायरॉयड ग्रंथि की कार्यप्रणाली और मेटाबॉलिज्म नियंत्रण को दर्शाता है।' };
+  return { en: '', hi: '' };
 }
 
 export function explainObservation(observation = {}) {
@@ -124,9 +178,10 @@ export function explainObservation(observation = {}) {
   const range = `${observation.referenceLow}–${observation.referenceHigh}${unit ? ` ${unit}` : ''}`;
   const position = status === 'normal' ? 'within' : status === 'high' ? 'above' : 'below';
   const hindi = status === 'normal' ? 'के भीतर' : status === 'high' ? 'से ऊपर' : 'से नीचे';
+  const context = biomarkerContext(name);
   return {
-    en: `${name} is ${display}, ${position} this report's reference range (${range}). A result alone does not establish a diagnosis.`,
-    hi: `${name} का मान ${display} है, जो इस रिपोर्ट की संदर्भ सीमा (${range}) ${hindi} है। केवल एक परिणाम से निदान नहीं होता।`,
+    en: `${name} is ${display}, ${position} this report's reference range (${range}).${context.en} A result alone does not establish a diagnosis.`,
+    hi: `${name} का मान ${display} है, जो इस रिपोर्ट की संदर्भ सीमा (${range}) ${hindi} है।${context.hi} केवल एक परिणाम से निदान नहीं होता।`,
   };
 }
 
@@ -149,7 +204,10 @@ export function normalizeExtraction(raw, metadata = {}) {
   };
   const observations = bounded(raw.observations, 100, 'Observations').map((item, index) => {
     const name = safeText(item.name, 120) || `Unidentified result ${index + 1}`;
-    const source = clean(item.sourceText, 1500);
+    let source = clean(item.sourceText, 1500);
+    if (!source) {
+      source = resolveMissingSourceSnippet(sourceText, source, name);
+    }
     const supported = includesEvidence(sourceText, source) && includesEvidence(source, name) && !INSTRUCTION_TEXT.test(source);
     if (!supported) warn('One or more observation snippets could not be verified against the source text.');
     const numeric = (value, label) => {
@@ -200,19 +258,32 @@ export function normalizeExtraction(raw, metadata = {}) {
   });
   const medications = bounded(raw.medications, 30, 'Medications').flatMap(item => {
     const name = safeText(item.name, 120);
-    const source = clean(item.sourceText, 1500);
+    let source = clean(item.sourceText, 1500);
+    if (!source) {
+      source = resolveMissingSourceSnippet(sourceText, source, name);
+    }
     if (!name || !includesEvidence(sourceText, source) || !includesEvidence(source, name) || INSTRUCTION_TEXT.test(source)) {
       warn('A medication without verifiable source evidence was omitted.'); return [];
     }
     const supportedField = field => {
       const text = safeText(item[field], 350);
-      if (!text || includesEvidence(source, text)) return text;
+      if (!text) return '';
+      if (includesEvidence(source, text) || includesEvidence(sourceText, text)) return text;
+      const compSource = comparable(source);
+      const compText = comparable(text);
+      if (compSource.includes(compText)) return text;
+      const words = compText.split(/[^a-z0-9]+/).filter(w => w.length > 2 && !['take', 'with', 'after', 'before', 'once', 'twice', 'daily', 'days', 'tablet', 'tab', 'capsule', 'cap'].includes(w));
+      if (words.length > 0 && words.every(w => compSource.includes(w))) return text;
       warn('An unsupported medication instruction was left blank for review.'); return '';
     };
     return [{ id: randomUUID(), name, dosage: supportedField('dosage'), frequency: supportedField('frequency'), duration: supportedField('duration'), instructions: supportedField('instructions'), sourceText: source }];
   });
   const diagnoses = bounded(raw.diagnoses, 20, 'Diagnoses').flatMap(item => {
-    const name = safeText(item.name, 120); const source = clean(item.sourceText, 1500);
+    const name = safeText(item.name, 120);
+    let source = clean(item.sourceText, 1500);
+    if (!source) {
+      source = resolveMissingSourceSnippet(sourceText, source, name);
+    }
     if (!name || !includesEvidence(sourceText, source) || !includesEvidence(source, name) || INSTRUCTION_TEXT.test(source)) {
       warn('A diagnosis without verifiable source evidence was omitted; results were not converted into diagnoses.'); return [];
     }

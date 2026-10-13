@@ -2,8 +2,12 @@
 // Fixtures are hand-authored examples, not an AI accuracy or clinical validation claim.
 export const demoPatient = {
   id: 'demo-patient-aarav', name: 'Aarav Sharma', dateOfBirth: '1992-08-15', gender: 'male',
-  bloodGroup: 'O+', allergies: ['Penicillin'], abhaId: null, abhaLinked: false,
+  bloodGroup: 'O+', allergies: ['Penicillin'],
+  conditions: ['Pre-diabetes (Lifestyle monitored)', 'Mild Vitamin D deficiency'],
+  emergencyContact: { name: 'Priya Sharma', phone: '+91 98765 43210', relation: 'Spouse' },
+  abhaId: '91-2345-6789-0123', abhaAddress: 'aarav.sharma@abdm', abhaLinked: true,
 };
+
 
 function observation(id, name, value, unit, referenceLow, referenceHigh, status, sourceText) {
   const number = `${value} ${unit}`;
@@ -145,3 +149,50 @@ export const demoRecords = [
   discharge,
   priorPanel({ id: 'demo-lab-apr', date: '2026-04-06', month: 'April', hba1c: 6.5, glucose: 126, hemoglobin: 13.8, vitaminD: 16 }),
 ];
+
+export const demoVitals = [
+  { id: 'vital-1', recordedAt: '2026-10-12T08:30:00.000Z', systolic: 118, diastolic: 78, heartRate: 72, bloodGlucose: 104, spO2: 99, weightKg: 74.2, notes: 'Resting morning vitals' },
+  { id: 'vital-2', recordedAt: '2026-10-05T09:00:00.000Z', systolic: 122, diastolic: 80, heartRate: 75, bloodGlucose: 110, spO2: 98, weightKg: 74.5, notes: 'Post-walk check' },
+  { id: 'vital-3', recordedAt: '2026-09-28T08:45:00.000Z', systolic: 124, diastolic: 82, heartRate: 74, bloodGlucose: 115, spO2: 98, weightKg: 75.0, notes: 'Routine check' },
+];
+
+export const abdmImportedRecords = [
+  {
+    ...base('abdm-rec-cardio', 'Cardiology Consultation & ECG Report', 'diagnostic', '2026-09-14', 'Max Super Speciality Hospital, Saket', 'max-cardiology-abdm-fhir.pdf'),
+    sourceText: `ABDM LINKED RECORD — HEALTH INFORMATION PROVIDER: IN070001\nMAX SUPER SPECIALITY HOSPITAL, SAKET, NEW DELHI\nABHA Number: 91-2345-6789-0123 | ABHA Address: aarav.sharma@abdm\nConsent Artifact ID: ABDM-CA-98721 | Timestamp: 2026-09-14\nConsultant: Dr. Arvind Sethi, MD, DM (Cardiology)\nChief Complaint: Annual cardiovascular risk screening\nResting Blood Pressure: 120/80 mmHg | Heart Rate: 72 bpm\nResting 12-lead ECG: Normal sinus rhythm. Normal axis. No ST-T segment changes or ischemia.\nEchocardiogram: Normal LV systolic function, EF 62%. No regional wall motion abnormality.\nAssessment: Low 10-year ASCVD cardiovascular risk. Continue 30 min daily aerobic exercise and balanced diet.`,
+    summary: {
+      en: 'ABDM-imported cardiology evaluation from Max Super Speciality Hospital. ECG showed normal sinus rhythm and echocardiogram demonstrated normal heart pumping function (EF 62%). Clinician assessed low cardiovascular risk.',
+      hi: 'मैक्स सुपर स्पेशियलिटी अस्पताल से ABDM-इम्पोर्टेड कार्डियोलॉजी रिपोर्ट। ईसीजी सामान्य साइनस रिदम दर्शाती है और इकोकार्डियोग्राम सामान्य हृदय कार्यप्रणाली (EF 62%) दिखाता है। हृदय जोखिम कम पाया गया।',
+    },
+    keyPoints: [
+      { en: 'Resting ECG: Normal sinus rhythm with no ischemic changes.', hi: 'ईसीजी: सामान्य साइनस रिदम, कोई असामान्यता नहीं।' },
+      { en: 'Heart pumping efficiency (EF 62%) is within normal parameters.', hi: 'हार्ट पंपिंग क्षमता (EF 62%) सामान्य सीमा में है।' },
+    ],
+    diagnoses: [{ name: 'Cardiovascular risk evaluation: Low risk', sourceText: 'Assessment: Low 10-year ASCVD cardiovascular risk.' }],
+    observations: [
+      observation('abdm-ecg-hr', 'Heart Rate', 72, 'bpm', 60, 100, 'normal', 'Heart Rate: 72 bpm; normal range 60-100 bpm'),
+      observation('abdm-ecg-ef', 'Ejection Fraction', 62, '%', 55, 70, 'normal', 'Echocardiogram: Normal LV systolic function, EF 62%'),
+    ],
+    provenance: { mode: 'demo', extractionModel: 'ABDM FHIR Bridge (NRCES DiagnosticReport)', processedAt: '2026-09-14T10:00:00.000Z', warnings: ['Imported via ABDM Health Information Exchange with mock consent artifact ABDM-CA-98721.'] },
+  },
+  {
+    ...base('abdm-rec-lipid', 'Comprehensive Lipid Profile', 'lab', '2026-06-20', 'Dr. Lal PathLabs, Delhi', 'lalpath-lipid-abdm-fhir.pdf'),
+    sourceText: `ABDM LINKED RECORD — HEALTH INFORMATION PROVIDER: IN070002\nDR. LAL PATHLABS, NATIONAL REFERENCE LAB, DELHI\nABHA Number: 91-2345-6789-0123 | ABHA Address: aarav.sharma@abdm\nConsent Artifact ID: ABDM-CA-98722 | Sample Date: 2026-06-20\nTotal Cholesterol: 188 mg/dL; reference range: 125 - 200 mg/dL\nTriglycerides: 142 mg/dL; reference range: 50 - 150 mg/dL\nHDL Cholesterol: 48 mg/dL; reference range: 40 - 60 mg/dL\nLDL Cholesterol: 111 mg/dL; reference range: 0 - 100 mg/dL\nReport note: Borderline elevated LDL. Advise dietary modifications with clinical review.`,
+    summary: {
+      en: 'ABDM-imported lipid panel from Dr. Lal PathLabs. Total cholesterol (188 mg/dL), triglycerides (142 mg/dL), and HDL (48 mg/dL) are within desirable reference limits. LDL cholesterol (111 mg/dL) is slightly above the report reference limit.',
+      hi: 'डॉ. लाल पैथलैब्स से ABDM-इम्पोर्टेड लिपिड प्रोफाइल। कुल कोलेस्ट्रॉल (188 mg/dL), ट्राइग्लिसराइड्स (142 mg/dL), और HDL (48 mg/dL) सामान्य सीमा में हैं। LDL कोलेस्ट्रॉल (111 mg/dL) सीमा से थोड़ा ऊपर है।',
+    },
+    keyPoints: [
+      { en: 'Total Cholesterol 188 mg/dL · within desirable range.', hi: 'कुल कोलेस्ट्रॉल 188 mg/dL · सामान्य सीमा में।' },
+      { en: 'LDL Cholesterol 111 mg/dL · slightly above reference range (0–100 mg/dL).', hi: 'LDL कोलेस्ट्रॉल 111 mg/dL · रिपोर्ट सीमा (0–100 mg/dL) से थोड़ा ऊपर।' },
+    ],
+    observations: [
+      observation('abdm-lip-tc', 'Total Cholesterol', 188, 'mg/dL', 125, 200, 'normal', 'Total Cholesterol: 188 mg/dL; reference range: 125 - 200 mg/dL'),
+      observation('abdm-lip-tg', 'Triglycerides', 142, 'mg/dL', 50, 150, 'normal', 'Triglycerides: 142 mg/dL; reference range: 50 - 150 mg/dL'),
+      observation('abdm-lip-hdl', 'HDL Cholesterol', 48, 'mg/dL', 40, 60, 'normal', 'HDL Cholesterol: 48 mg/dL; reference range: 40 - 60 mg/dL'),
+      observation('abdm-lip-ldl', 'LDL Cholesterol', 111, 'mg/dL', 0, 100, 'high', 'LDL Cholesterol: 111 mg/dL; reference range: 0 - 100 mg/dL'),
+    ],
+    provenance: { mode: 'demo', extractionModel: 'ABDM FHIR Bridge (NRCES LaboratoryRecord)', processedAt: '2026-06-20T11:15:00.000Z', warnings: ['Imported via ABDM Health Information Exchange with mock consent artifact ABDM-CA-98722.'] },
+  },
+];
+

@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { demoPatient, demoRecords } from '../shared/demo.mjs';
+import { demoPatient, demoRecords, demoVitals, abdmImportedRecords } from '../shared/demo.mjs';
 import { createStore } from './store.mjs';
 import { createNimClient } from './nim.mjs';
+import { createAiClient } from './ai.mjs';
 import { processDocument, validateFile, MAX_FILE_SIZE, DocumentError } from './pipeline.mjs';
 import { classifyObservation, explainObservation } from './domain.mjs';
 import { buildFhirBundle } from './fhir.mjs';
@@ -110,11 +111,25 @@ function localAnswer(records, language, unavailable = false) {
   return { answer: intro + text, citations: selected.map(r => ({ recordId: r.id, title: r.title })), mode: 'local', model: 'record-summary-fallback' };
 }
 
-export function createApp({ databasePath = resolve(process.env.DATA_DIR || resolve(root, 'data'), 'sehat.sqlite'), nim = createNimClient(), seed = true, devOrigins = defaultDevOrigins() } = {}) {
+export function createApp({ databasePath = resolve(process.env.DATA_DIR || resolve(root, 'data'), 'sehat.sqlite'), nim, ai = nim || createAiClient(), seed = true, devOrigins = defaultDevOrigins() } = {}) {
   const app = express();
   app.disable('x-powered-by');
   const store = createStore(databasePath, { patient: demoPatient, records: seed ? demoRecords : [] });
-  const bootstrap = () => ({ patient: store.getPatient(), records: store.listRecords(), ai: { configured: nim.configured, models: nim.models } });
+  if (seed && !store.listVitals().length) {
+    demoVitals.forEach(vital => store.saveVital(structuredClone(vital)));
+  }
+  const bootstrap = () => ({
+    patient: store.getPatient(),
+    records: store.listRecords(),
+    vitals: store.listVitals(),
+    ai: {
+      configured: ai.configured,
+      provider: ai.activeProvider || (ai.configured ? 'nvidia' : 'local'),
+      models: ai.models,
+      geminiConfigured: Boolean(ai.geminiConfigured),
+      nvidiaConfigured: Boolean(ai.nvidiaConfigured ?? ai.configured),
+    },
+  });
   let runningJobs = 0;
   let runningChats = 0;
   app.use((req, res, next) => {
@@ -164,7 +179,7 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
       const update = changes => { job = store.saveJob({ ...job, ...changes }); };
       try {
         update({ status: 'processing', stage: 'Reading document' });
-        const record = await processDocument(file, nim, stage => update({ stage }));
+        const record = await processDocument(file, ai, stage => update({ stage }));
         store.saveRecord(record);
         update({ status: 'completed', stage: 'Saved to timeline', recordId: record.id });
       } catch (error) {
@@ -210,11 +225,85 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
         patient.abhaId = `${digits.slice(0, 2)}-${digits.slice(2, 6)}-${digits.slice(6, 10)}-${digits.slice(10)}`;
       }
     }
+    if ('abhaAddress' in body) {
+      patient.abhaAddress = body.abhaAddress ? clean(body.abhaAddress, 100) : null;
+    }
+    if ('conditions' in body && Array.isArray(body.conditions)) {
+      patient.conditions = body.conditions.map(c => clean(c, 100)).filter(Boolean);
+    }
+    if ('emergencyContact' in body && isObject(body.emergencyContact)) {
+      patient.emergencyContact = {
+        name: clean(body.emergencyContact.name, 100),
+        phone: clean(body.emergencyContact.phone, 30),
+        relation: clean(body.emergencyContact.relation, 50),
+      };
+    }
     if ('abhaLinked' in body) {
       if (typeof body.abhaLinked !== 'boolean' || (body.abhaLinked && !patient.abhaId)) throw new DocumentError('A mock ABHA number is required before linking.');
       patient.abhaLinked = body.abhaLinked;
     }
     res.json(store.savePatient(patient));
+  });
+  app.post('/api/patient/abha-import', (_req, res) => {
+    const patient = structuredClone(store.getPatient());
+    patient.abhaLinked = true;
+    patient.abhaId = patient.abhaId || '91-2345-6789-0123';
+    patient.abhaAddress = patient.abhaAddress || 'aarav.sharma@abdm';
+    store.savePatient(patient);
+    const existing = new Set(store.listRecords().map(r => r.id));
+    const toImport = abdmImportedRecords.filter(r => !existing.has(r.id));
+    for (const rec of toImport) {
+      store.saveRecord(structuredClone(rec));
+    }
+    res.json({ ok: true, importedCount: toImport.length, totalRecords: store.listRecords().length });
+  });
+  app.get('/api/ai/config', (_req, res) => {
+    res.json({
+      ok: true,
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
+      nvidiaConfigured: Boolean(process.env.NVIDIA_API_KEY?.trim()),
+      preferredProvider: process.env.OCR_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'nvidia'),
+    });
+  });
+  app.post('/api/ai/config', (req, res) => {
+    const geminiKey = clean(req.body?.geminiApiKey, 250);
+    const preferred = clean(req.body?.preferredProvider, 50);
+    if (geminiKey) {
+      process.env.GEMINI_API_KEY = geminiKey;
+    }
+    if (preferred) {
+      process.env.OCR_PROVIDER = preferred;
+    }
+    res.json({
+      ok: true,
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
+      nvidiaConfigured: Boolean(process.env.NVIDIA_API_KEY?.trim()),
+      preferredProvider: process.env.OCR_PROVIDER || (process.env.GEMINI_API_KEY ? 'gemini' : 'nvidia'),
+    });
+  });
+  app.get('/api/vitals', (_req, res) => res.json(store.listVitals()));
+  app.post('/api/vitals', (req, res) => {
+    if (!isObject(req.body)) throw new DocumentError('Provide vital reading details.');
+    const systolic = Number(req.body.systolic);
+    const diastolic = Number(req.body.diastolic);
+    const heartRate = Number(req.body.heartRate);
+    if (!Number.isFinite(systolic) || systolic < 50 || systolic > 260) throw new DocumentError('Enter valid systolic BP (50-260 mmHg).');
+    if (!Number.isFinite(diastolic) || diastolic < 30 || diastolic > 180) throw new DocumentError('Enter valid diastolic BP (30-180 mmHg).');
+    if (!Number.isFinite(heartRate) || heartRate < 30 || heartRate > 240) throw new DocumentError('Enter valid heart rate (30-240 bpm).');
+    const vital = {
+      id: randomUUID(),
+      recordedAt: req.body.recordedAt && validDate(req.body.recordedAt.slice(0, 10)) ? new Date(req.body.recordedAt).toISOString() : new Date().toISOString(),
+      systolic, diastolic, heartRate,
+      bloodGlucose: req.body.bloodGlucose !== undefined && req.body.bloodGlucose !== null && req.body.bloodGlucose !== '' ? Number(req.body.bloodGlucose) : null,
+      spO2: req.body.spO2 !== undefined && req.body.spO2 !== null && req.body.spO2 !== '' ? Number(req.body.spO2) : null,
+      weightKg: req.body.weightKg !== undefined && req.body.weightKg !== null && req.body.weightKg !== '' ? Number(req.body.weightKg) : null,
+      notes: clean(req.body.notes, 200),
+    };
+    res.status(201).json(store.saveVital(vital));
+  });
+  app.delete('/api/vitals/:id', (req, res) => {
+    if (!store.deleteVital(req.params.id)) return res.status(404).json({ error: 'Vital reading not found.' });
+    res.status(204).end();
   });
   app.post('/api/chat', async (req, res) => {
     const message = clean(req.body?.message, 2000);
@@ -227,13 +316,13 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
     const ids = req.body?.recordIds;
     if (ids !== undefined && (!Array.isArray(ids) || ids.length > 50 || ids.some(id => typeof id !== 'string'))) throw new DocumentError('Invalid record selection.');
     const records = (ids ? allRecords.filter(record => ids.includes(record.id)) : allRecords).slice(0, 10);
-    if (!nim.configured || !records.length) return res.json(localAnswer(records, language));
+    if (!ai.configured || !records.length) return res.json(localAnswer(records, language));
     runningChats++;
     try {
       const evidence = buildFactCatalog(records, language);
-      const reply = await nim.chat(message, language, evidence);
+      const reply = await ai.chat(message, language, evidence);
       const grounded = renderSelectedFacts(reply, evidence, language);
-      res.json({ ...grounded, mode: 'live', model: reply.model || (language === 'hi' ? nim.models.extraction : nim.models.chat) });
+      res.json({ ...grounded, mode: 'live', model: reply.model || (language === 'hi' ? ai.models.extraction : ai.models.chat) });
     } catch { res.json(localAnswer(records, language, true)); }
     finally { runningChats--; }
   });
@@ -243,7 +332,7 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
   });
   app.post('/api/demo/reset', (_req, res) => {
     if (runningJobs) return res.status(409).json({ error: 'Wait for document processing to finish before resetting demo data.' });
-    store.reset(); res.json(bootstrap());
+    store.reset(demoVitals); res.json(bootstrap());
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
   const dist = resolve(root, 'dist');

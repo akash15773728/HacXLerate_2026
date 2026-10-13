@@ -1,4 +1,4 @@
-import type { Bootstrap, ChatResponse, HealthRecord, Patient, UploadJob } from '../shared/types';
+import type { Bootstrap, ChatResponse, HealthRecord, Patient, UploadJob, VitalsEntry } from '../shared/types';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, options);
@@ -17,5 +17,11 @@ export const api = {
   deleteRecord: (id: string) => request<void>(`/records/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   chat: (message: string, language: string) => request<ChatResponse>('/chat', json({ message, language })),
   patient: (body: Partial<Patient>) => request<Patient>('/patient', json(body, 'PATCH')),
+  importAbha: () => request<{ ok: boolean; importedCount: number; totalRecords: number }>('/patient/abha-import', json({})),
+  vitals: () => request<VitalsEntry[]>('/vitals'),
+  addVital: (data: Partial<VitalsEntry>) => request<VitalsEntry>('/vitals', json(data)),
+  deleteVital: (id: string) => request<void>(`/vitals/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  configureAi: (body: { geminiApiKey?: string; preferredProvider?: string }) => request<{ ok: boolean; geminiConfigured: boolean; nvidiaConfigured: boolean; preferredProvider: string }>('/ai/config', json(body)),
+  getAiConfig: () => request<{ ok: boolean; geminiConfigured: boolean; nvidiaConfigured: boolean; preferredProvider: string }>('/ai/config'),
   reset: () => request<Bootstrap>('/demo/reset', json({})),
 };

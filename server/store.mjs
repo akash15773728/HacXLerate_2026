@@ -9,7 +9,8 @@ export function createStore(databasePath, { patient, records = [] } = {}) {
   db.exec(`PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS vitals (id TEXT PRIMARY KEY, payload TEXT NOT NULL);`);
   const read = value => value ? JSON.parse(value.payload) : undefined;
   const recordGet = db.prepare('SELECT payload FROM records WHERE id = ?');
   const recordPut = db.prepare('INSERT OR REPLACE INTO records(id,payload) VALUES(?,?)');
@@ -17,6 +18,8 @@ export function createStore(databasePath, { patient, records = [] } = {}) {
   const settingPut = db.prepare('INSERT OR REPLACE INTO settings(id,payload) VALUES(?,?)');
   const jobGet = db.prepare('SELECT payload FROM jobs WHERE id = ?');
   const jobPut = db.prepare('INSERT OR REPLACE INTO jobs(id,payload) VALUES(?,?)');
+  const vitalGet = db.prepare('SELECT payload FROM vitals WHERE id = ?');
+  const vitalPut = db.prepare('INSERT OR REPLACE INTO vitals(id,payload) VALUES(?,?)');
   const store = {
     getPatient: () => read(settingGet.get('patient')),
     savePatient(value) { settingPut.run('patient', JSON.stringify(value)); return value; },
@@ -24,14 +27,19 @@ export function createStore(databasePath, { patient, records = [] } = {}) {
     getRecord: id => read(recordGet.get(id)),
     saveRecord(record) { recordPut.run(record.id, JSON.stringify(record)); return record; },
     deleteRecord: id => db.prepare('DELETE FROM records WHERE id = ?').run(id).changes > 0,
+    listVitals: () => db.prepare('SELECT payload FROM vitals').all().map(read).sort((a, b) => (b.recordedAt || '').localeCompare(a.recordedAt || '')),
+    getVital: id => read(vitalGet.get(id)),
+    saveVital(vital) { vitalPut.run(vital.id, JSON.stringify(vital)); return vital; },
+    deleteVital: id => db.prepare('DELETE FROM vitals WHERE id = ?').run(id).changes > 0,
     getJob: id => read(jobGet.get(id)),
     saveJob(job) { jobPut.run(job.id, JSON.stringify(job)); return job; },
-    reset() {
+    reset(initialVitals = []) {
       db.exec('BEGIN');
       try {
-        db.exec('DELETE FROM records; DELETE FROM jobs;');
+        db.exec('DELETE FROM records; DELETE FROM jobs; DELETE FROM vitals;');
         if (patient) store.savePatient(structuredClone(patient));
         records.forEach(record => store.saveRecord(structuredClone(record)));
+        initialVitals.forEach(vital => store.saveVital(structuredClone(vital)));
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     },

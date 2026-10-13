@@ -13,8 +13,11 @@ export function buildFhirBundle(patient, records = []) {
     entry.push({ fullUrl, resource: { resourceType: resource.resourceType, id, ...resource } });
     return { reference: fullUrl };
   };
+  const identifiers = [{ system: 'urn:sehat:local-patient-id', value: patient.id }];
+  if (patient.abhaId) identifiers.push({ system: 'https://healthid.ndhm.gov.in', value: patient.abhaId });
+  if (patient.abhaAddress) identifiers.push({ system: 'https://phr.ndhm.gov.in', value: patient.abhaAddress });
   const patientResource = {
-    resourceType: 'Patient', identifier: [{ system: 'urn:sehat:local-patient-id', value: patient.id }],
+    resourceType: 'Patient', identifier: identifiers,
     name: [{ text: patient.name }], gender: ['male', 'female', 'other', 'unknown'].includes(patient.gender) ? patient.gender : 'unknown',
   };
   if (/^\d{4}-\d{2}-\d{2}$/.test(patient.dateOfBirth)) patientResource.birthDate = patient.dateOfBirth;

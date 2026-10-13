@@ -47,7 +47,24 @@ async function imageForOcr(buffer) {
   const context = canvas.getContext('2d');
   context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height);
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.9);
+
+  // Gentle contrast stretch: darkens faint ink and whitens background paper
+  try {
+    const imgData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        let val = data[i + c];
+        val = ((val - 128) * 1.15) + 128;
+        data[i + c] = Math.min(255, Math.max(0, val));
+      }
+    }
+    context.putImageData(imgData, 0, 0);
+  } catch {
+    // If pixel manipulation fails, proceed with canvas image
+  }
+
+  return canvas.toDataURL('image/jpeg', 0.92);
 }
 
 async function readPdf(buffer, nim, stage) {
@@ -105,6 +122,7 @@ async function readPdf(buffer, nim, stage) {
 export function localExtract(sourceText) {
   const observations = [];
   const medications = [];
+  const diagnoses = [];
   const number = '[-+]?\\d+(?:\\.\\d+)?';
   const unitPattern = /^(%|g\/dL|mg\/dL|mmol\/L|mIU\/L|uIU\/mL|IU\/L|U\/L|ng\/mL|pg\/mL|fL|pg|g\/L|mm\/hr|cells\/.*|10\^\d+\/.*|x10.*)$/i;
   const labelPattern = /^(date|patient|age|phone|id|abha|sample|report|provider|page)\b/i;
@@ -114,14 +132,12 @@ export function localExtract(sourceText) {
   // Two layouts, tried in order:
   //   "Name: value unit; reference range: low - high"   (result first)
   //   "Name (low - high unit): value unit"              (range printed first)
-  // The second is common in Indian lab reports, and a naive greedy name group reads the range's
-  // upper bound as the result, discarding the real value. Parsing left-to-right from the field
-  // separator keeps the result anchored to the field that actually holds it.
   const resultFirst = new RegExp(`^([\\p{L}][\\p{L}\\d ()/.,%'-]{1,65}?)\\s*[:|]?\\s+(${number})\\s*([\\p{L}\\dµμ%/.*^-]+)?(?:\\s*[|,(;]?\\s*(?:reference(?:\\s+range)?|ref\\.?|range|normal)?\\s*[:(]?\\s*(${number})\\s*[-–—]\\s*(${number}))?`, 'iu');
   const rangeFirst = new RegExp(`^([\\p{L}][\\p{L}\\d ()/.,%'-]{1,65}?)\\s*\\(\\s*(${number})\\s*[-–—]\\s*(${number})\\s*([\\p{L}\\dµμ%/.*^-]*)\\s*\\)\\s*[:|]?\\s*(${number})\\s*([\\p{L}\\dµμ%/.*^-]+)?`, 'iu');
 
   for (const line of sourceText.split(/\r?\n/)) {
     const text = line.trim();
+    if (!text) continue;
     let parsed = null;
 
     const before = text.match(rangeFirst);
@@ -134,19 +150,56 @@ export function localExtract(sourceText) {
 
     if (!parsed) {
       const match = text.match(resultFirst);
-      // The name must not have swallowed a range fragment, or the "value" is that range's bound.
       if (match && !rangeFragment.test(match[1]) && !labelPattern.test(match[1]) && match[3] && unitPattern.test(match[3])) {
         parsed = { name: match[1], value: Number(match[2]), unit: match[3], referenceLow: match[4] === undefined ? null : Number(match[4]), referenceHigh: match[5] === undefined ? null : Number(match[5]) };
       }
     }
 
-    if (!parsed) continue;
-    observations.push({ ...parsed, name: parsed.name.trim().replace(/:$/, '').trim(), sourceText: text });
+    if (parsed) {
+      observations.push({ ...parsed, name: parsed.name.trim().replace(/:$/, '').trim(), sourceText: text });
+      continue;
+    }
+
+    // Prescription / Medication parsing
+    const medMatch = text.match(/(?:^\s*(?:\d+[.)]\s*)?(?:Rx:?\s*)?(?:(?:Tab|Tablet|Cap|Capsule|Syp|Syrup|Inj|Injection)\.?\s+)?([A-Za-z][A-Za-z0-9\s/-]{2,40}?)\s+(\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml|iu|units?))\b(?:\s*[-–—:,]?\s*([^\r\n]+))?)/i);
+    if (medMatch && !labelPattern.test(medMatch[1])) {
+      const name = medMatch[1].trim();
+      const dosage = medMatch[2].trim();
+      const details = (medMatch[3] || '').trim();
+      const freqMatch = details.match(/\b(once\s+daily|twice\s+daily|thrice\s+daily|\d+\s*times?\s+daily|od|bd|tds|tid|qid|sos|weekly|in\s+the\s+morning|at\s+bedtime)\b/i);
+      const durMatch = details.match(/\b(for\s+\d+\s*(?:days?|weeks?|months?)|\d+\s*(?:days?|weeks?|months?))\b/i);
+      const frequency = freqMatch ? freqMatch[0] : '';
+      const duration = durMatch ? durMatch[0] : '';
+      const instructions = details.replace(freqMatch?.[0] || '', '').replace(durMatch?.[0] || '', '').replace(/^[-,.;\s]+|[-,.;\s]+$/g, '').trim();
+      medications.push({ name, dosage, frequency, duration, instructions, sourceText: text });
+      continue;
+    }
+
+    // Diagnosis parsing
+    const diagMatch = text.match(/^(?:diagnosis|impression|assessment|diagnoses|condition)\s*:\s*([^\r\n]+)/i);
+    if (diagMatch && diagMatch[1].trim()) {
+      diagnoses.push({ name: diagMatch[1].trim().replace(/[.;]+$/, ''), sourceText: text });
+    }
   }
+
   const date = sourceText.match(/(?:date|dated|दिनांक)\s*:?\s*(\d{4}-\d{2}-\d{2})/i)?.[1] || null;
-  const provider = sourceText.match(/(?:provider|laboratory|clinic)\s*:\s*([^\r\n]+)/i)?.[1]?.trim() || '';
-  if (observations.length === 0) throw new DocumentError('The local parser could not extract medical values from this document. Configure NVIDIA AI for prescriptions, diagnostic reports, and less structured documents.');
-  return { title: 'Uploaded laboratory report', type: 'lab', date, provider, observations, medications, diagnoses: [] };
+  const provider = sourceText.match(/(?:provider|laboratory|clinic|hospital)\s*:\s*([^\r\n]+)/i)?.[1]?.trim() || '';
+
+  if (observations.length === 0 && medications.length === 0 && diagnoses.length === 0) {
+    throw new DocumentError('The local parser could not extract medical values from this document. Configure NVIDIA AI for prescriptions, diagnostic reports, and less structured documents.');
+  }
+
+  let type = 'lab';
+  let title = 'Uploaded laboratory report';
+  if (medications.length > observations.length) {
+    type = 'prescription';
+    title = 'Uploaded prescription';
+  } else if (diagnoses.length > 0 && medications.length > 0) {
+    type = 'discharge';
+    title = 'Discharge summary';
+  }
+
+  return { title, type, date, provider, observations, medications, diagnoses };
 }
 
 export async function processDocument(file, nim, stage = () => {}) {
@@ -166,7 +219,17 @@ export async function processDocument(file, nim, stage = () => {}) {
   }
   sourceText = cleanSource(sourceText);
   stage(nim.configured ? 'Extracting structured fields' : 'Extracting with local parser');
-  const raw = nim.configured ? await nim.extract(sourceText) : localExtract(sourceText);
+  let raw;
+  if (nim.configured) {
+    try {
+      raw = await nim.extract(sourceText);
+    } catch (err) {
+      console.warn('NVIDIA AI extraction error, falling back to local parser:', err?.message || err);
+      raw = localExtract(sourceText);
+    }
+  } else {
+    raw = localExtract(sourceText);
+  }
   stage('Validating source evidence');
   const warnings = [];
   if (!nim.configured) warnings.push('Limited local parser used; no AI model was called. Only explicit laboratory rows were extracted.');

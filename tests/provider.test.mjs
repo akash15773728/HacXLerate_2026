@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createNimClient, parseModelJson } from '../server/nim.mjs';
+import { createGeminiClient } from '../server/gemini.mjs';
+import { createAiClient } from '../server/ai.mjs';
 import { validateFile, localExtract } from '../server/pipeline.mjs';
 
 test('model JSON parser accepts wrappers without executing instructions and rejects incomplete output', () => {
@@ -57,4 +59,48 @@ test('offline sample extracts the four ranges printed after semicolon delimiters
   assert.equal(result.observations[0].referenceHigh, 5.6);
   assert.equal(result.observations[3].referenceLow, 30);
   assert.equal(result.observations[3].referenceHigh, 100);
+});
+
+test('Gemini client transcribes handwriting via inline data and maps errors without exposing keys', async () => {
+  const secret = 'gemini-key-secret-999';
+  let capturedBody;
+  const gemini = createGeminiClient({
+    apiKey: secret,
+    fetchImpl: async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'Rx: Tab Augmentin 625 mg' }] } }],
+      }));
+    },
+  });
+  const text = await gemini.vision('data:image/jpeg;base64,aGVsbG8=');
+  assert.equal(text, 'Rx: Tab Augmentin 625 mg');
+  assert.equal(capturedBody.contents[0].parts[1].inline_data.data, 'aGVsbG8=');
+
+  // Verify errors do not expose apiKey
+  const errClient = createGeminiClient({
+    apiKey: secret,
+    fetchImpl: async () => new Response(JSON.stringify({ error: secret }), { status: 401 }),
+  });
+  await assert.rejects(errClient.vision('data:image/jpeg;base64,aGVsbG8='), err => !err.message.includes(secret) && /invalid/i.test(err.message));
+});
+
+test('Unified AI router prioritizes Gemini Flash for handwritten vision OCR and supports NIM extraction', async () => {
+  const gemini = createGeminiClient({
+    apiKey: 'gemini-test',
+    fetchImpl: async () => new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: 'Handwritten prescription transcription' }] } }],
+    })),
+  });
+  const nim = createNimClient({
+    apiKey: 'nim-test',
+    fetchImpl: async () => new Response(JSON.stringify({
+      choices: [{ finish_reason: 'stop', message: { content: '{"title":"Prescription","medications":[],"observations":[]}' } }],
+    })),
+  });
+  const ai = createAiClient({ gemini, nim });
+  assert.equal(ai.activeProvider, 'gemini');
+  assert.equal(await ai.vision('data:image/jpeg;base64,dGVzdA=='), 'Handwritten prescription transcription');
+  const extracted = await ai.extract('Handwritten prescription transcription');
+  assert.equal(extracted.title, 'Prescription');
 });
