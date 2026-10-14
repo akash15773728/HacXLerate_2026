@@ -18,6 +18,12 @@ const clean = (value, max = 200) => typeof value === 'string' ? value.replace(/[
 const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
 const validDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 const localHostname = value => ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(value);
+const isProductionOrRemote = Boolean(
+  process.env.RENDER ||
+  process.env.NODE_ENV === 'production' ||
+  process.env.ALLOW_REMOTE === 'true' ||
+  (process.env.HOST && process.env.HOST !== '127.0.0.1' && process.env.HOST !== 'localhost')
+);
 
 /**
  * The Vite dev proxy that the documented `npm run dev` workflow uses. It rewrites Host but forwards
@@ -114,6 +120,9 @@ function localAnswer(records, language, unavailable = false) {
 export function createApp({ databasePath = resolve(process.env.DATA_DIR || resolve(root, 'data'), 'sehat.sqlite'), nim, ai = nim || createAiClient(), seed = true, devOrigins = defaultDevOrigins() } = {}) {
   const app = express();
   app.disable('x-powered-by');
+  if (isProductionOrRemote) {
+    app.set('trust proxy', 1);
+  }
   const store = createStore(databasePath, { patient: demoPatient, records: seed ? demoRecords : [] });
   if (seed && !store.listVitals().length) {
     demoVitals.forEach(vital => store.saveVital(structuredClone(vital)));
@@ -135,7 +144,7 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
   app.use((req, res, next) => {
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY' });
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
-    if (!localHostname(req.hostname)) return res.status(403).json({ error: 'This local prototype accepts only localhost requests.' });
+    if (!isProductionOrRemote && !localHostname(req.hostname)) return res.status(403).json({ error: 'This local prototype accepts only localhost requests.' });
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers.origin) {
       // Compare the FULL origin (scheme + host + port), not just the hostname: matching only the
       // hostname would treat http://localhost:<any-port> — another local dev server, or any page
@@ -152,7 +161,8 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
       for (const candidate of devOrigins) own.add(candidate);
       try {
         const origin = new URL(req.headers.origin);
-        if (!localHostname(origin.hostname) || !['http:', 'https:'].includes(origin.protocol) || !own.has(origin.origin)) throw new Error();
+        if (!isProductionOrRemote && !localHostname(origin.hostname)) throw new Error();
+        if (!['http:', 'https:'].includes(origin.protocol) || !own.has(origin.origin)) throw new Error();
       } catch { return res.status(403).json({ error: 'Cross-site requests are not allowed.' }); }
     }
     next();
@@ -353,8 +363,9 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { app, store } = createApp();
   const port = Number(process.env.PORT) || 3001;
-  const host = process.env.HOST || '127.0.0.1';
-  if (!localHostname(host)) throw new Error('This single-user prototype must bind to a loopback address.');
+  const defaultHost = isProductionOrRemote ? '0.0.0.0' : '127.0.0.1';
+  const host = process.env.HOST || defaultHost;
+  if (!isProductionOrRemote && !localHostname(host)) throw new Error('This single-user prototype must bind to a loopback address unless configured for remote deployment.');
   const server = app.listen(port, host, () => console.log(`Sehat API is ready at http://${host}:${port}`));
   const shutdown = () => server.close(() => { store.close(); process.exit(0); });
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
