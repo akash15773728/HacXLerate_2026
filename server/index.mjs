@@ -160,7 +160,7 @@ export function createApp({ databasePath = resolve(process.env.DATA_DIR || resol
   app.use(express.json({ limit: '200kb' }));
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_SIZE, files: 1, fields: 4, parts: 6, fieldSize: 200 } });
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'Sehat local API', ai: { configured: nim.configured, models: nim.models } }));
+  app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'Sehat local API', ai: { configured: ai.configured, models: ai.models } }));
   app.get('/api/bootstrap', (_req, res) => res.json(bootstrap()));
   app.get('/api/records/:id', (req, res) => {
     const record = store.getRecord(req.params.id);
